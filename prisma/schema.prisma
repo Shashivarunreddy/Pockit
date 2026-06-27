@@ -1,0 +1,181 @@
+// ============================================================================
+// Circle PM — Prisma schema (PostgreSQL)
+// Scope: single shared space. Every user sees every project, can be assigned
+// to any task, and can comment on any task. No workspaces/teams/tenancy.
+// ----------------------------------------------------------------------------
+// Decisions baked in (see CLAUDE_1.md §4):
+//   - UUID primary keys.
+//   - Global users (no membership tables) — anyone assignable to any task.
+//   - Status is a shared enum (same columns for every project).
+//   - Card order within a column = Task.position (Float).
+//   - Soft-archive via archivedAt; queries default to archivedAt: null.
+//   - Mock auth stores a bcrypt passwordHash; this table survives the Auth.js swap.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  // Prisma 7: the connection URL lives in prisma.config.ts (for the CLI/Migrate)
+  // and is supplied at runtime via the @prisma/adapter-pg driver adapter in lib/db.ts.
+}
+
+// ----------------------------------------------------------------------------
+// Enums
+// ----------------------------------------------------------------------------
+
+enum TaskStatus {
+  BACKLOG
+  TODO
+  IN_PROGRESS
+  IN_REVIEW
+  DONE
+}
+
+enum Priority {
+  NONE
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum Role {
+  MEMBER
+  ADMIN
+}
+
+enum UserStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// ----------------------------------------------------------------------------
+// Models
+// ----------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(uuid())
+  name         String
+  email        String   @unique
+  passwordHash String // mock auth (bcrypt). Keep this table when swapping to Auth.js.
+  avatarUrl    String?
+  role         Role       @default(MEMBER)
+  status       UserStatus @default(PENDING)
+  approvedAt   DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  createdProjects Project[] @relation("ProjectCreator")
+  createdTasks    Task[]    @relation("TaskCreator")
+  assignedTasks   Task[]    @relation("TaskAssignee")
+  comments        Comment[]
+
+  // Private personal board — see MyColumn/MyItem below. Owned by exactly one user.
+  myColumns MyColumn[]
+  myItems   MyItem[]
+
+  @@index([status])
+}
+
+model Project {
+  id          String    @id @default(uuid())
+  name        String
+  description String?   @db.Text
+  color       String? // accent for the project card
+  creatorId   String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  archivedAt  DateTime? // soft-archive; queries filter archivedAt: null
+
+  creator User   @relation("ProjectCreator", fields: [creatorId], references: [id])
+  tasks   Task[]
+
+  @@index([creatorId])
+}
+
+model Task {
+  id          String     @id @default(uuid())
+  projectId   String
+  title       String
+  description String?    @db.Text
+  status      TaskStatus @default(TODO)
+  priority    Priority   @default(NONE)
+  position    Float      @default(0) // ordering within its status column
+  assigneeId  String?
+  creatorId   String
+  dueDate     DateTime?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  completedAt DateTime?
+  archivedAt  DateTime?
+
+  project  Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assignee User?     @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  creator  User      @relation("TaskCreator", fields: [creatorId], references: [id])
+  comments Comment[]
+
+  @@index([projectId])
+  @@index([assigneeId])
+  @@index([status])
+}
+
+model Comment {
+  id        String   @id @default(uuid())
+  taskId    String
+  authorId  String
+  body      String   @db.Text
+  createdAt DateTime @default(now())
+
+  task   Task @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  author User @relation(fields: [authorId], references: [id])
+
+  @@index([taskId])
+  @@index([authorId])
+}
+
+// ----------------------------------------------------------------------------
+// Personal board ("My Items") — PRIVATE to one user.
+//
+// Unlike Project/Task (a single shared space everyone sees), MyColumn/MyItem
+// are owned by exactly one user via `userId`. Every query and mutation filters
+// on the current user's id, so no one else can read or change them. The columns
+// are user-defined headings ("To Do", "Will do later", "Done", ...) that the
+// owner can rename, recolor, add, and delete freely.
+// ----------------------------------------------------------------------------
+
+model MyColumn {
+  id        String   @id @default(uuid())
+  userId    String
+  name      String
+  color     String? // accent dot for the column header
+  position  Float    @default(0) // left-to-right order
+  createdAt DateTime @default(now())
+
+  user  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items MyItem[]
+
+  @@index([userId])
+}
+
+model MyItem {
+  id          String   @id @default(uuid())
+  userId      String
+  columnId    String
+  title       String
+  description String?  @db.Text
+  priority    Priority @default(NONE)
+  position    Float    @default(0) // order within its column
+  dueDate     DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user   User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  column MyColumn @relation(fields: [columnId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([columnId])
+}
